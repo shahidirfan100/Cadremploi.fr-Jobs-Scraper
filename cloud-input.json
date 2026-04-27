@@ -1,8 +1,0 @@
-{
-  "url": "https://www.cadremploi.fr/emploi/liste_offres",
-  "results_wanted": 200,
-  "max_pages": 5,
-  "proxyConfiguration": {
-    "useApifyProxy": false
-  }
-}

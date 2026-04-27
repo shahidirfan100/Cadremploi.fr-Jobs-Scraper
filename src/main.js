@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import { Actor, log } from 'apify';
 import { Dataset } from 'crawlee';
 import { gotScraping } from 'got-scraping';
@@ -122,6 +124,72 @@ const removeEmpty = (value) => {
         return Object.keys(out).length ? out : undefined;
     }
     return value;
+};
+
+const isObjectWithKeys = (value) => (
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && Object.keys(value).length > 0
+);
+
+const loadSchemaFallbackInput = async () => {
+    try {
+        const raw = await readFile('.actor/input_schema.json', 'utf8');
+        const schema = JSON.parse(raw);
+        const properties = schema?.properties;
+        if (!properties || typeof properties !== 'object') return {};
+
+        const fromSchema = {};
+        for (const [key, config] of Object.entries(properties)) {
+            if (!config || typeof config !== 'object') continue;
+            if (config.prefill !== undefined) {
+                fromSchema[key] = config.prefill;
+                continue;
+            }
+            if (config.default !== undefined) {
+                fromSchema[key] = config.default;
+            }
+        }
+
+        return isObjectWithKeys(fromSchema) ? fromSchema : {};
+    } catch (err) {
+        log.debug(`Could not read schema fallback input: ${err.message}`);
+        return {};
+    }
+};
+
+const loadInputJsonFallback = async () => {
+    try {
+        const raw = await readFile('INPUT.json', 'utf8');
+        const parsed = JSON.parse(raw);
+        return isObjectWithKeys(parsed) ? parsed : {};
+    } catch (err) {
+        log.debug(`Could not read INPUT.json fallback: ${err.message}`);
+        return {};
+    }
+};
+
+const resolveInput = async () => {
+    const runtimeInput = (await Actor.getInput()) || {};
+    if (isObjectWithKeys(runtimeInput)) {
+        return runtimeInput;
+    }
+
+    const schemaFallback = await loadSchemaFallbackInput();
+    if (isObjectWithKeys(schemaFallback)) {
+        log.info('Actor input is empty. Using defaults from .actor/input_schema.json.');
+        return schemaFallback;
+    }
+
+    const inputJsonFallback = await loadInputJsonFallback();
+    if (isObjectWithKeys(inputJsonFallback)) {
+        log.info('Actor input and schema defaults are empty. Using INPUT.json fallback.');
+        return inputJsonFallback;
+    }
+
+    log.warning('No runtime input, schema defaults, or INPUT.json fallback found. Using empty input.');
+    return {};
 };
 
 const extractStartUrl = (input) => {
@@ -380,7 +448,7 @@ const inferSmallLogoFromLarge = (logoLarge) => {
 await Actor.init();
 
 try {
-    const input = (await Actor.getInput()) || {};
+    const input = await resolveInput();
 
     const parsed = parseFiltersFromUrl(extractStartUrl(input));
 
