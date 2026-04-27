@@ -1,0 +1,58 @@
+{
+  "title": "Cadremploi.fr Jobs Scraper",
+  "description": "Extract job listings from Cadremploi.fr using its listing API. Provide either a Cadremploi listing URL or keyword/location filters.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "url": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Cadremploi listing URL, for example https://www.cadremploi.fr/emploi/liste_offres or a filtered listing URL.",
+      "editor": "textfield",
+      "prefill": "https://www.cadremploi.fr/emploi/liste_offres"
+    },
+    "keyword": {
+      "title": "Keyword",
+      "type": "string",
+      "description": "Optional keyword. When provided, it overrides keyword values from the URL.",
+      "editor": "textfield",
+      "prefill": "infirmier"
+    },
+    "location": {
+      "title": "Location",
+      "type": "string",
+      "description": "Optional location text such as Paris, Lyon, or Marseille.",
+      "editor": "textfield",
+      "prefill": "Paris"
+    },
+    "results_wanted": {
+      "title": "Maximum number of jobs",
+      "type": "integer",
+      "description": "Maximum number of jobs to save.",
+      "minimum": 1,
+      "default": 20,
+      "prefill": 20,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum pages",
+      "type": "integer",
+      "description": "Safety cap for API pages to fetch.",
+      "minimum": 1,
+      "default": 10,
+      "prefill": 10,
+      "editor": "number"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Optional. Leave disabled for maximum speed, or enable Apify Proxy when your network gets blocked.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": false
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
