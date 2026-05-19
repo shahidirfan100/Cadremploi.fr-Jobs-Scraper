@@ -5,12 +5,6 @@ import { Dataset } from 'crawlee';
 import { gotScraping } from 'got-scraping';
 import { CookieJar } from 'tough-cookie';
 
-const USER_AGENTS = [
-    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0',
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 15.7; rv:147.0) Gecko/20100101 Firefox/147.0',
-    'Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0',
-];
-
 const REG_ISO_TO_CODE = {
     'FR-J': '12',
     'FR-V': '22',
@@ -25,8 +19,6 @@ const REG_ISO_TO_CODE = {
 };
 
 const DEFAULT_COMPANY_LOGO = 'https://www.cadremploi.fr/favicon.ico';
-
-const pickUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
 
 const toInt = (value, fallback) => {
     const num = Number(value);
@@ -247,7 +239,14 @@ const resolveLocation = async (location) => {
     const response = await gotScraping.get(`https://services.cadremploi.fr/services/suggestions/v1/locations/${query}`, {
         headers: {
             Accept: 'application/json',
-            'User-Agent': pickUserAgent(),
+        },
+        headerGeneratorOptions: {
+            browsers: [
+                { name: 'chrome', minVersion: 100 },
+                { name: 'firefox', minVersion: 100 },
+            ],
+            devices: ['desktop'],
+            locales: ['fr-FR', 'fr'],
         },
         timeout: { request: 30000 },
     });
@@ -313,11 +312,20 @@ const normalizeLogoUrl = (value) => {
 const buildBaseRequestOptions = (ctx, headers = {}) => ({
     cookieJar: ctx.cookieJar,
     proxyUrl: ctx.proxyUrl,
+    sessionToken: ctx.sessionToken,
     throwHttpErrors: false,
     timeout: { request: 30000 },
     retry: { limit: 2 },
+    headerGeneratorOptions: {
+        browsers: [
+            { name: 'chrome', minVersion: 100 },
+            { name: 'firefox', minVersion: 100 },
+            { name: 'safari', minVersion: 15 },
+        ],
+        devices: ['desktop'],
+        locales: ['fr-FR', 'fr'],
+    },
     headers: {
-        'user-agent': ctx.userAgent,
         ...headers,
     },
 });
@@ -331,13 +339,20 @@ const parseJsonSafe = (value) => {
 };
 
 const createHttpSession = async ({ startUrl, proxyConfiguration }) => {
-    const userAgent = pickUserAgent();
     const cookieJar = new CookieJar();
     const proxyUrl = proxyConfiguration
-        ? await proxyConfiguration.newUrl('cadremploi-session')
+        ? await proxyConfiguration.newUrl('cadremploi_session')
         : undefined;
 
-    const startRes = await gotScraping.get(startUrl, buildBaseRequestOptions({ userAgent, cookieJar, proxyUrl }, {
+    const sessionToken = {};
+
+    const session = {
+        cookieJar,
+        proxyUrl,
+        sessionToken,
+    };
+
+    const startRes = await gotScraping.get(startUrl, buildBaseRequestOptions(session, {
         accept: 'text/html,application/xhtml+xml',
     }));
 
@@ -347,7 +362,7 @@ const createHttpSession = async ({ startUrl, proxyConfiguration }) => {
 
     await gotScraping.post(
         'https://www.cadremploi.fr/emploi/sessionData/create_session',
-        buildBaseRequestOptions({ userAgent, cookieJar, proxyUrl }, {
+        buildBaseRequestOptions(session, {
             accept: 'application/json, text/plain, */*',
             'content-type': 'application/json',
             referer: startUrl,
@@ -355,11 +370,7 @@ const createHttpSession = async ({ startUrl, proxyConfiguration }) => {
         }),
     );
 
-    return {
-        userAgent,
-        cookieJar,
-        proxyUrl,
-    };
+    return session;
 };
 
 const fetchOffersPage = async ({ session, payload, startUrl }) => {
@@ -447,21 +458,34 @@ const inferSmallLogoFromLarge = (logoLarge) => {
 
 await Actor.init();
 
+let exitCode = 0;
 try {
     const input = await resolveInput();
 
+    const {
+        results_wanted = 20,
+        max_pages = 10,
+        keyword: keywordInput = '',
+        location: locationInput = '',
+    } = input;
+
     const parsed = parseFiltersFromUrl(extractStartUrl(input));
 
-    const resultsWanted = toInt(input.results_wanted, 20);
-    const maxPages = toInt(input.max_pages, 10);
+    const resultsWanted = toInt(results_wanted, 20);
+    const maxPages = toInt(max_pages, 10);
 
-    const keyword = typeof input.keyword === 'string' ? input.keyword.trim() : '';
-    const location = typeof input.location === 'string' ? input.location.trim() : '';
+    const keyword = typeof keywordInput === 'string' ? keywordInput.trim() : '';
+    const location = typeof locationInput === 'string' ? locationInput.trim() : '';
 
     const locationFilter = location ? await resolveLocation(location) : {};
 
-    const proxyConfiguration = input.proxyConfiguration
-        ? await Actor.createProxyConfiguration(input.proxyConfiguration)
+    // Use Apify proxy by default on the platform to avoid being blocked
+    let proxyConfig = input.proxyConfiguration;
+    if (!proxyConfig && Actor.isAtHome()) {
+        proxyConfig = { useApifyProxy: true };
+    }
+    const proxyConfiguration = proxyConfig
+        ? await Actor.createProxyConfiguration(proxyConfig)
         : undefined;
 
     const session = await createHttpSession({
@@ -506,7 +530,11 @@ try {
         });
 
         if (response.status !== 200 || !response.json) {
-            log.warning(`Offers API returned ${response.status}. Preview: ${String(response.body).slice(0, 300)}`);
+            const errorMsg = `Offers API returned ${response.status}. Preview: ${String(response.body).slice(0, 300)}`;
+            log.error(errorMsg);
+            if (pageNumber === 1) {
+                throw new Error(`Failed to fetch the first page of jobs: ${errorMsg}`);
+            }
             break;
         }
 
@@ -672,6 +700,9 @@ try {
     }
 
     log.info(`Extraction complete. Total saved jobs: ${saved}`);
+} catch (error) {
+    log.error(`Actor failed: ${error.message}`, { error });
+    exitCode = 1;
 } finally {
-    await Actor.exit();
+    await Actor.exit({ exitCode });
 }

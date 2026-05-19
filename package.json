@@ -4,7 +4,7 @@
   "description": "Cadremploi.fr jobs scraper using Cadremploi listing API.",
   "type": "module",
   "dependencies": {
-    "apify": "^3.7.0",
+    "apify": "^3.7.2",
     "cheerio": "^1.2.0",
     "crawlee": "^3.16.0",
     "got-scraping": "^4.2.1",

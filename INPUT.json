@@ -1,5 +1,7 @@
 {
   "url": "https://www.cadremploi.fr/emploi/liste_offres",
+  "keyword": "infirmier",
+  "location": "Paris",
   "results_wanted": 20,
-  "max_pages": 3
+  "max_pages": 10
 }
