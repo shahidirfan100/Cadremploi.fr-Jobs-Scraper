@@ -127,6 +127,13 @@ const isObjectWithKeys = (value) => (
     && Object.keys(value).length > 0
 );
 
+const shouldCreateProxyConfiguration = (proxyConfig) => {
+    if (!proxyConfig || typeof proxyConfig !== 'object') return false;
+    if (proxyConfig.useApifyProxy === true) return true;
+    if (Array.isArray(proxyConfig.proxyUrls) && proxyConfig.proxyUrls.length > 0) return true;
+    return false;
+};
+
 const loadSchemaFallbackInput = async () => {
     try {
         const raw = await readFile('.actor/input_schema.json', 'utf8');
@@ -394,12 +401,12 @@ const createHttpSession = async ({ startUrl, proxyConfiguration }) => {
                 if (startRes.statusCode >= 400) {
                     lastErrorMessage = `Start page status ${startRes.statusCode} on ${candidateStartUrl}`;
                     if (BLOCK_STATUSES.has(startRes.statusCode)) {
-                        log.warning(
+                        log.debug(
                             `Session init blocked (${startRes.statusCode}) on ${candidateStartUrl} `
                             + `(attempt ${attempt}/${maxAttemptsPerUrl}). Retrying with a fresh session.`,
                         );
                     } else {
-                        log.warning(
+                        log.debug(
                             `Session init failed with ${startRes.statusCode} on ${candidateStartUrl} `
                             + `(attempt ${attempt}/${maxAttemptsPerUrl}).`,
                         );
@@ -420,7 +427,7 @@ const createHttpSession = async ({ startUrl, proxyConfiguration }) => {
 
                 if (createSessionRes.statusCode >= 400) {
                     lastErrorMessage = `Session endpoint status ${createSessionRes.statusCode} after ${candidateStartUrl}`;
-                    log.warning(
+                    log.debug(
                         `Session bootstrap endpoint returned ${createSessionRes.statusCode} `
                         + `(attempt ${attempt}/${maxAttemptsPerUrl}).`,
                     );
@@ -434,7 +441,7 @@ const createHttpSession = async ({ startUrl, proxyConfiguration }) => {
                 };
             } catch (err) {
                 lastErrorMessage = err.message;
-                log.warning(
+                log.debug(
                     `Session init network error on ${candidateStartUrl} `
                     + `(attempt ${attempt}/${maxAttemptsPerUrl}): ${err.message}`,
                 );
@@ -451,7 +458,7 @@ const createHttpSessionWithFallback = async ({ startUrl, proxyConfiguration }) =
         return await createHttpSession({ startUrl, proxyConfiguration });
     } catch (err) {
         if (!proxyConfiguration) throw err;
-        log.warning(
+        log.debug(
             `Session bootstrap with proxy failed (${err.message}). Retrying once without proxy.`,
         );
         return createHttpSession({ startUrl, proxyConfiguration: undefined });
@@ -505,7 +512,7 @@ const fetchOffersPageWithRecovery = async ({
             }
 
             if (attempt === 1) {
-                log.warning(
+                log.debug(
                     `Offers API returned ${response.status}. Re-initializing session and retrying once.`,
                 );
                 currentSession = await createHttpSessionWithFallback({
@@ -517,7 +524,7 @@ const fetchOffersPageWithRecovery = async ({
         } catch (err) {
             lastError = err;
             if (attempt === 1) {
-                log.warning(`Offers API request failed (${err.message}). Re-initializing session and retrying once.`);
+                log.debug(`Offers API request failed (${err.message}). Re-initializing session and retrying once.`);
                 currentSession = await createHttpSessionWithFallback({
                     startUrl,
                     proxyConfiguration,
@@ -622,12 +629,8 @@ try {
 
     const locationFilter = location ? await resolveLocation(location) : {};
 
-    // Use Apify proxy by default on the platform to avoid being blocked
-    let proxyConfig = input.proxyConfiguration;
-    if (!proxyConfig && Actor.isAtHome()) {
-        proxyConfig = { useApifyProxy: true };
-    }
-    const proxyConfiguration = proxyConfig
+    const proxyConfig = input.proxyConfiguration;
+    const proxyConfiguration = shouldCreateProxyConfiguration(proxyConfig)
         ? await Actor.createProxyConfiguration(proxyConfig)
         : undefined;
 
