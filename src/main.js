@@ -19,6 +19,8 @@ const REG_ISO_TO_CODE = {
 };
 
 const DEFAULT_COMPANY_LOGO = 'https://www.cadremploi.fr/favicon.ico';
+const DEFAULT_START_URL = 'https://www.cadremploi.fr/emploi/liste_offres';
+const BLOCK_STATUSES = new Set([401, 403, 429]);
 
 const toInt = (value, fallback) => {
     const num = Number(value);
@@ -338,39 +340,122 @@ const parseJsonSafe = (value) => {
     }
 };
 
+const uniqueUrls = (values) => {
+    const out = [];
+    const seen = new Set();
+    for (const value of values) {
+        const normalized = normalizeScalar(value);
+        if (!normalized) continue;
+        if (seen.has(normalized)) continue;
+        seen.add(normalized);
+        out.push(normalized);
+    }
+    return out;
+};
+
+const delay = (ms) => new Promise((resolve) => {
+    setTimeout(resolve, ms);
+});
+
 const createHttpSession = async ({ startUrl, proxyConfiguration }) => {
-    const cookieJar = new CookieJar();
-    const proxyUrl = proxyConfiguration
-        ? await proxyConfiguration.newUrl('cadremploi_session')
-        : undefined;
+    const startUrlCandidates = uniqueUrls([
+        startUrl,
+        DEFAULT_START_URL,
+        'https://www.cadremploi.fr/',
+    ]);
+    const maxAttemptsPerUrl = proxyConfiguration ? 3 : 2;
+    let attemptCounter = 0;
+    let lastErrorMessage = 'Unknown session initialization error';
 
-    const sessionToken = {};
+    for (const candidateStartUrl of startUrlCandidates) {
+        for (let attempt = 1; attempt <= maxAttemptsPerUrl; attempt++) {
+            attemptCounter++;
+            const cookieJar = new CookieJar();
+            const sessionToken = {};
+            const proxySessionId = `cad${Date.now().toString(36)}_${attemptCounter}`;
+            const proxyUrl = proxyConfiguration
+                ? await proxyConfiguration.newUrl(proxySessionId)
+                : undefined;
 
-    const session = {
-        cookieJar,
-        proxyUrl,
-        sessionToken,
-    };
+            const session = {
+                cookieJar,
+                proxyUrl,
+                sessionToken,
+            };
 
-    const startRes = await gotScraping.get(startUrl, buildBaseRequestOptions(session, {
-        accept: 'text/html,application/xhtml+xml',
-    }));
+            try {
+                const startRes = await gotScraping.get(candidateStartUrl, buildBaseRequestOptions(session, {
+                    accept: 'text/html,application/xhtml+xml',
+                    'cache-control': 'no-cache',
+                    pragma: 'no-cache',
+                    'upgrade-insecure-requests': '1',
+                }));
 
-    if (startRes.statusCode >= 400) {
-        throw new Error(`Failed to initialize session. Start page status: ${startRes.statusCode}`);
+                if (startRes.statusCode >= 400) {
+                    lastErrorMessage = `Start page status ${startRes.statusCode} on ${candidateStartUrl}`;
+                    if (BLOCK_STATUSES.has(startRes.statusCode)) {
+                        log.warning(
+                            `Session init blocked (${startRes.statusCode}) on ${candidateStartUrl} `
+                            + `(attempt ${attempt}/${maxAttemptsPerUrl}). Retrying with a fresh session.`,
+                        );
+                    } else {
+                        log.warning(
+                            `Session init failed with ${startRes.statusCode} on ${candidateStartUrl} `
+                            + `(attempt ${attempt}/${maxAttemptsPerUrl}).`,
+                        );
+                    }
+                    await delay(300 * attempt);
+                    continue;
+                }
+
+                const createSessionRes = await gotScraping.post(
+                    'https://www.cadremploi.fr/emploi/sessionData/create_session',
+                    buildBaseRequestOptions(session, {
+                        accept: 'application/json, text/plain, */*',
+                        'content-type': 'application/json',
+                        referer: candidateStartUrl,
+                        origin: 'https://www.cadremploi.fr',
+                    }),
+                );
+
+                if (createSessionRes.statusCode >= 400) {
+                    lastErrorMessage = `Session endpoint status ${createSessionRes.statusCode} after ${candidateStartUrl}`;
+                    log.warning(
+                        `Session bootstrap endpoint returned ${createSessionRes.statusCode} `
+                        + `(attempt ${attempt}/${maxAttemptsPerUrl}).`,
+                    );
+                    await delay(300 * attempt);
+                    continue;
+                }
+
+                return {
+                    ...session,
+                    startUrlUsed: candidateStartUrl,
+                };
+            } catch (err) {
+                lastErrorMessage = err.message;
+                log.warning(
+                    `Session init network error on ${candidateStartUrl} `
+                    + `(attempt ${attempt}/${maxAttemptsPerUrl}): ${err.message}`,
+                );
+                await delay(300 * attempt);
+            }
+        }
     }
 
-    await gotScraping.post(
-        'https://www.cadremploi.fr/emploi/sessionData/create_session',
-        buildBaseRequestOptions(session, {
-            accept: 'application/json, text/plain, */*',
-            'content-type': 'application/json',
-            referer: startUrl,
-            origin: 'https://www.cadremploi.fr',
-        }),
-    );
+    throw new Error(`Failed to initialize session after retries. Last error: ${lastErrorMessage}`);
+};
 
-    return session;
+const createHttpSessionWithFallback = async ({ startUrl, proxyConfiguration }) => {
+    try {
+        return await createHttpSession({ startUrl, proxyConfiguration });
+    } catch (err) {
+        if (!proxyConfiguration) throw err;
+        log.warning(
+            `Session bootstrap with proxy failed (${err.message}). Retrying once without proxy.`,
+        );
+        return createHttpSession({ startUrl, proxyConfiguration: undefined });
+    }
 };
 
 const fetchOffersPage = async ({ session, payload, startUrl }) => {
@@ -392,6 +477,64 @@ const fetchOffersPage = async ({ session, payload, startUrl }) => {
         body: res.body,
         json: parseJsonSafe(res.body),
     };
+};
+
+const fetchOffersPageWithRecovery = async ({
+    session,
+    payload,
+    startUrl,
+    proxyConfiguration,
+}) => {
+    let currentSession = session;
+    let lastResponse;
+    let lastError;
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            const response = await fetchOffersPage({
+                session: currentSession,
+                payload,
+                startUrl,
+            });
+            lastResponse = response;
+            if (!BLOCK_STATUSES.has(response.status)) {
+                return {
+                    session: currentSession,
+                    response,
+                };
+            }
+
+            if (attempt === 1) {
+                log.warning(
+                    `Offers API returned ${response.status}. Re-initializing session and retrying once.`,
+                );
+                currentSession = await createHttpSessionWithFallback({
+                    startUrl,
+                    proxyConfiguration,
+                });
+                continue;
+            }
+        } catch (err) {
+            lastError = err;
+            if (attempt === 1) {
+                log.warning(`Offers API request failed (${err.message}). Re-initializing session and retrying once.`);
+                currentSession = await createHttpSessionWithFallback({
+                    startUrl,
+                    proxyConfiguration,
+                });
+                continue;
+            }
+        }
+    }
+
+    if (lastResponse) {
+        return {
+            session: currentSession,
+            response: lastResponse,
+        };
+    }
+
+    throw lastError || new Error('Offers API request failed without a response.');
 };
 
 const fetchOfferDetailsMap = async ({ session, offerIds, concurrency = 10 }) => {
@@ -488,7 +631,7 @@ try {
         ? await Actor.createProxyConfiguration(proxyConfig)
         : undefined;
 
-    const session = await createHttpSession({
+    let session = await createHttpSessionWithFallback({
         startUrl: parsed.startUrl,
         proxyConfiguration,
     });
@@ -523,11 +666,14 @@ try {
             isSEO: true,
         });
 
-        const response = await fetchOffersPage({
+        const pageResult = await fetchOffersPageWithRecovery({
             session,
             payload,
             startUrl: parsed.startUrl,
+            proxyConfiguration,
         });
+        session = pageResult.session;
+        const { response } = pageResult;
 
         if (response.status !== 200 || !response.json) {
             const errorMsg = `Offers API returned ${response.status}. Preview: ${String(response.body).slice(0, 300)}`;
